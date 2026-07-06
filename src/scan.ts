@@ -2,6 +2,8 @@
 // Runs from the 23:00 UTC cron (09:00 AEST) and on demand via POST /scan.
 // Note: Reddit blocks Cloudflare Worker IPs — kept best-effort; YouTube RSS is the video workhorse.
 
+import { YOUTUBE_CHANNELS } from "./scan-channels";
+
 export interface Candidate {
 	title: string;
 	url: string;
@@ -12,16 +14,6 @@ export interface Candidate {
 }
 
 const SUBREDDITS = ["robotics", "artificial", "singularity"];
-
-// Verified channels from oc-config docs/creator-os/news-sources.md
-const YOUTUBE_CHANNELS: Array<[string, string]> = [
-	["UCbfYPyITQ-7l4upoX8nvctg", "Two Minute Papers"],
-	["UCZHmQk67mSJgfCCTn7xBfew", "Yannic Kilcher"],
-	["UCZ2MeG5jTIqgzEMiByrIzsw", "AI Explained"],
-	["UChpleBmo18P08aKCIgti38g", "Matt Wolfe"],
-	["UCbY9xX3_jW5c2fjlZVBI4cg", "TheAIGRID"],
-	["UCsBjURrPoezykLs9EqgamOA", "Fireship"],
-];
 
 const UA = { "User-Agent": "creator-os-agent/1.0 (ProAgentStore)" };
 const FRESH_MS = 48 * 3600_000; // videos from the last 48h only
