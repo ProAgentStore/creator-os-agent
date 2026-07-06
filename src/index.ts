@@ -26,7 +26,7 @@ interface QueueEntry {
 interface LogEntry {
 	at: number;
 	platform: string;
-	result: "SUCCESS" | "FAILED" | "SKIPPED" | "QUEUED" | "EXPIRED";
+	result: "SUCCESS" | "FAILED" | "SKIPPED" | "QUEUED" | "EXPIRED" | "DROPPED";
 	attempts: number;
 	linkOrError: string;
 }
@@ -61,6 +61,11 @@ app.post("/queue", async (c) => {
 	}
 	const entry = await agentDo(c.env).enqueue(body);
 	return c.json({ queued: entry });
+});
+
+app.delete("/queue/:id", async (c) => {
+	const result = await agentDo(c.env).dequeue(c.req.param("id"));
+	return c.json(result, result.dropped ? 200 : 404);
 });
 
 app.get("/log", async (c) => c.json(await agentDo(c.env).getLog()));
@@ -138,6 +143,7 @@ function agentDo(env: Env) {
 	return {
 		getQueue: () => doCall<QueueEntry[]>(stub, "/do/queue"),
 		enqueue: (e: Omit<QueueEntry, "id" | "queuedAt">) => doCall<QueueEntry>(stub, "/do/enqueue", e),
+		dequeue: (id: string) => doCall<{ dropped: boolean }>(stub, "/do/dequeue", { id }),
 		getLog: () => doCall<LogEntry[]>(stub, "/do/log"),
 		logPost: (e: LogEntry) => doCall<{ ok: boolean }>(stub, "/do/log-post", e),
 		eligible: (platform: string) => doCall<{ eligible: boolean; reason: string }>(stub, "/do/eligible", { platform }),
@@ -200,6 +206,15 @@ export class GeneratedAgentDO {
 				await this.state.storage.put("post-queue", q);
 				await this.log({ at: Date.now(), platform: entry.platform, result: "QUEUED", attempts: 0, linkOrError: entry.reason });
 				return json(entry);
+			}
+			case "/do/dequeue": {
+				const { id } = await request.json<{ id: string }>();
+				const q = await this.queue();
+				const entry = q.find((e) => e.id === id);
+				if (!entry) return json({ dropped: false });
+				await this.state.storage.put("post-queue", q.filter((e) => e.id !== id));
+				await this.log({ at: Date.now(), platform: entry.platform, result: "DROPPED", attempts: 0, linkOrError: `owner dropped: ${entry.caption.slice(0, 60)}` });
+				return json({ dropped: true });
 			}
 			case "/do/log":
 				return json((await this.state.storage.get<LogEntry[]>("posting-log")) ?? []);
