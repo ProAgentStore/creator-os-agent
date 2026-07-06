@@ -1,18 +1,13 @@
 import { Hono } from "hono";
 import { callerInstagramCredentials, postInstagramReel } from "./instagram";
 import { runScan, type Candidate } from "./scan";
+import { QUEUE_EXPIRY_MS, eligibility, type LogEntry } from "./limits";
 
 interface Env {
 	AGENT: DurableObjectNamespace;
 }
 
 const MODEL = "claude-sonnet-4-6";
-
-// Hard publishing limits — protect the owner's accounts
-const DAILY_CAPS: Record<string, number> = { facebook: 2, x: 3, instagram: 1, tiktok: 2 };
-const PLATFORM_GAP_MS = 6 * 3600_000; // 6h per platform
-const GLOBAL_GAP_MS = 30 * 60_000; // 30min between any two posts
-const QUEUE_EXPIRY_MS = 72 * 3600_000; // 72h then expire
 
 interface QueueEntry {
 	id: string;
@@ -21,14 +16,6 @@ interface QueueEntry {
 	mediaRef: string;
 	caption: string; // platform-adapted, never the base caption
 	reason: string;
-}
-
-interface LogEntry {
-	at: number;
-	platform: string;
-	result: "SUCCESS" | "FAILED" | "SKIPPED" | "QUEUED" | "EXPIRED" | "DROPPED";
-	attempts: number;
-	linkOrError: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -84,15 +71,15 @@ app.post("/post/instagram", async (c) => {
 
 	const dObj = agentDo(c.env);
 	if (!force) {
-		const eligibility = await dObj.eligible("instagram");
-		if (!eligibility.eligible) {
+		const check = await dObj.eligible("instagram");
+		if (!check.eligible) {
 			const entry = await dObj.enqueue({
 				platform: "instagram",
 				mediaRef: video_url,
 				caption,
-				reason: eligibility.reason,
+				reason: check.reason,
 			});
-			return c.json({ posted: false, queued: entry, reason: eligibility.reason });
+			return c.json({ posted: false, queued: entry, reason: check.reason });
 		}
 	}
 
@@ -225,7 +212,7 @@ export class GeneratedAgentDO {
 			case "/do/eligible": {
 				const { platform } = await request.json<{ platform: string }>();
 				const logEntries = (await this.state.storage.get<LogEntry[]>("posting-log")) ?? [];
-				return json(this.eligibility(platform, logEntries, Date.now()));
+				return json(eligibility(platform, logEntries, Date.now()));
 			}
 			case "/do/drain":
 				return json(await this.drain());
@@ -272,7 +259,7 @@ export class GeneratedAgentDO {
 				await this.log({ at: now, platform: entry.platform, result: "EXPIRED", attempts: 0, linkOrError: "queued >72h" });
 				continue;
 			}
-			if (!this.eligibility(entry.platform, logEntries, now).eligible) {
+			if (!eligibility(entry.platform, logEntries, now).eligible) {
 				kept.push(entry);
 				continue;
 			}
@@ -284,28 +271,6 @@ export class GeneratedAgentDO {
 
 		await this.state.storage.put("post-queue", kept);
 		return { posted, kept: kept.length, expired };
-	}
-
-	private eligibility(platform: string, logEntries: LogEntry[], now: number): { eligible: boolean; reason: string } {
-		const successes = logEntries.filter((l) => l.result === "SUCCESS");
-		// AEST midnight = 14:00 UTC. NOTE: Melbourne shifts to AEDT (UTC+11) in summer,
-		// which moves the true local midnight to 13:00 UTC — the cap day is then offset
-		// by 1h. Acceptable drift for a safety cap; revisit if it ever matters.
-		const aestMidnightUtc = new Date(now).setUTCHours(14, 0, 0, 0);
-		const todayStart = aestMidnightUtc - (now < aestMidnightUtc ? 86400_000 : 0);
-		const todayOnPlatform = successes.filter((l) => l.platform === platform && l.at >= todayStart).length;
-		if (todayOnPlatform >= (DAILY_CAPS[platform] ?? 1)) {
-			return { eligible: false, reason: `daily cap reached for ${platform} (${todayOnPlatform}/${DAILY_CAPS[platform] ?? 1})` };
-		}
-		const lastOnPlatform = Math.max(0, ...successes.filter((l) => l.platform === platform).map((l) => l.at));
-		if (now - lastOnPlatform < PLATFORM_GAP_MS) {
-			return { eligible: false, reason: `6h gap not elapsed on ${platform}` };
-		}
-		const lastAny = Math.max(0, ...successes.map((l) => l.at));
-		if (now - lastAny < GLOBAL_GAP_MS) {
-			return { eligible: false, reason: "30min global gap not elapsed" };
-		}
-		return { eligible: true, reason: "" };
 	}
 }
 
