@@ -1,0 +1,16 @@
+{
+  "id": "creator-os-agent",
+  "name": "Creator OS",
+  "description": "Personal AI content agent: scheduled news scans, platform-adapted post drafts in your voice, per-platform rate limits with a retry queue, and publishing through your own logged-in browser sessions via the local runner. Explicit approval before anything posts.",
+  "storeType": "agent",
+  "category": "creative",
+  "model": "claude-sonnet-4-6",
+  "template": "worker",
+  "serverConfig": {
+    "durableObject": true,
+    "routes": [
+      "creator-os-agent.proagentstore.online/*"
+    ],
+    "aiBilling": "caller-provided"
+  }
+}
