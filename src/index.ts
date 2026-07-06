@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { callerInstagramCredentials, postInstagramReel } from "./instagram";
+import { runScan, type Candidate } from "./scan";
 
 interface Env {
 	AGENT: DurableObjectNamespace;
@@ -39,8 +40,15 @@ app.get("/", (c) =>
 		pipelines: ["scan", "draft", "publish", "cross-post", "queue-drain"],
 		crons: { scan: "09:00 AEST daily", drain: "10:00/15:00/20:00 AEST" },
 		postingRoutes: { instagram: "POST /post/instagram (X-Meta-Token, X-IG-User-ID)" },
+		suggestions: "GET /suggestions (refreshed by daily scan cron; POST /scan to refresh now)",
 		aiBilling: "caller-provided",
 	}));
+
+// ---- suggestions (daily scan output) ----
+
+app.get("/suggestions", async (c) => c.json(await agentDo(c.env).getSuggestions()));
+
+app.post("/scan", async (c) => c.json(await agentDo(c.env).scan()));
 
 // ---- queue + log (backed by the agent Durable Object) ----
 
@@ -124,7 +132,8 @@ function agentDo(env: Env) {
 		logPost: (e: LogEntry) => doCall<{ ok: boolean }>(stub, "/do/log-post", e),
 		eligible: (platform: string) => doCall<{ eligible: boolean; reason: string }>(stub, "/do/eligible", { platform }),
 		drain: () => doCall<{ posted: number; kept: number; expired: number }>(stub, "/do/drain", {}),
-		scan: () => doCall<{ status: string }>(stub, "/do/scan", {}),
+		scan: () => doCall<{ found: number; scannedAt: number }>(stub, "/do/scan", {}),
+		getSuggestions: () => doCall<{ scannedAt: number | null; candidates: Candidate[] }>(stub, "/do/suggestions"),
 	};
 }
 
@@ -195,11 +204,19 @@ export class GeneratedAgentDO {
 			}
 			case "/do/drain":
 				return json(await this.drain());
-			case "/do/scan":
-				// TODO: full scan pipeline (web search sources → score → present).
-				// Blocked on: owner notification surface (Discord webhook / messenger integration).
-				await this.state.storage.put("last-scan", Date.now());
-				return json({ status: "scan recorded; presentation surface pending messenger integration" });
+			case "/do/scan": {
+				const candidates = await runScan();
+				const scannedAt = Date.now();
+				await this.state.storage.put("suggestions", { scannedAt, candidates });
+				return json({ found: candidates.length, scannedAt });
+			}
+			case "/do/suggestions":
+				return json(
+					(await this.state.storage.get<{ scannedAt: number; candidates: Candidate[] }>("suggestions")) ?? {
+						scannedAt: null,
+						candidates: [],
+					},
+				);
 			default:
 				return json({ error: "unknown DO path" }, 404);
 		}
