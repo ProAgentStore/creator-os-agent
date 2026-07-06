@@ -69,13 +69,13 @@ export async function postInstagramReel(
 async function graphPost(token: string, endpoint: string, params: Record<string, string>): Promise<Record<string, string>> {
 	const body = new URLSearchParams({ ...params, access_token: token });
 	const res = await fetch(GRAPH + endpoint, { method: "POST", body });
-	return res.json().catch(() => ({}));
+	return (await res.json().catch(() => ({}))) as Record<string, string>;
 }
 
 async function graphGet(token: string, endpoint: string): Promise<Record<string, string>> {
 	const sep = endpoint.includes("?") ? "&" : "?";
 	const res = await fetch(`${GRAPH}${endpoint}${sep}access_token=${encodeURIComponent(token)}`);
-	return res.json().catch(() => ({}));
+	return (await res.json().catch(() => ({}))) as Record<string, string>;
 }
 
 function sleep(ms: number): Promise<void> {
