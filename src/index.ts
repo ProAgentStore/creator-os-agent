@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { callerInstagramCredentials, postInstagramReel } from "./instagram";
 
 interface Env {
 	AGENT: DurableObjectNamespace;
@@ -37,8 +38,8 @@ app.get("/", (c) =>
 		status: "ok",
 		pipelines: ["scan", "draft", "publish", "cross-post", "queue-drain"],
 		crons: { scan: "09:00 AEST daily", drain: "10:00/15:00/20:00 AEST" },
+		postingRoutes: { instagram: "POST /post/instagram (X-Meta-Token, X-IG-User-ID)" },
 		aiBilling: "caller-provided",
-		requiredHeaders: ["X-CF-Account-ID", "X-CF-AI-Token"],
 	}));
 
 // ---- queue + log (backed by the agent Durable Object) ----
@@ -57,6 +58,41 @@ app.post("/queue", async (c) => {
 app.get("/log", async (c) => c.json(await agentDo(c.env).getLog()));
 
 app.post("/drain", async (c) => c.json(await agentDo(c.env).drain()));
+
+// ---- posting routes (caller-provided credentials — never stored) ----
+
+app.post("/post/instagram", async (c) => {
+	const creds = callerInstagramCredentials(c.req.raw);
+	if (!creds) {
+		return c.json({ error: "credentials_required", message: "Pass X-Meta-Token and X-IG-User-ID headers." }, 402);
+	}
+	const { video_url, caption, force } = await c.req.json<{ video_url: string; caption: string; force?: boolean }>();
+	if (!video_url || !caption) return c.json({ error: "video_url and caption required" }, 400);
+
+	const dObj = agentDo(c.env);
+	if (!force) {
+		const eligibility = await dObj.eligible("instagram");
+		if (!eligibility.eligible) {
+			const entry = await dObj.enqueue({
+				platform: "instagram",
+				mediaRef: video_url,
+				caption,
+				reason: eligibility.reason,
+			});
+			return c.json({ posted: false, queued: entry, reason: eligibility.reason });
+		}
+	}
+
+	const result = await postInstagramReel(creds, video_url, caption);
+	await dObj.logPost({
+		at: Date.now(),
+		platform: "instagram",
+		result: result.ok ? "SUCCESS" : "FAILED",
+		attempts: 1,
+		linkOrError: result.ok ? (result.permalink ?? result.mediaId ?? "posted") : `${result.phase}: ${result.error}`,
+	});
+	return c.json(result, result.ok ? 200 : 502);
+});
 
 app.post("/chat", async (c) => {
 	const credentials = callerAiCredentials(c.req.raw);
@@ -85,6 +121,8 @@ function agentDo(env: Env) {
 		getQueue: () => doCall<QueueEntry[]>(stub, "/do/queue"),
 		enqueue: (e: Omit<QueueEntry, "id" | "queuedAt">) => doCall<QueueEntry>(stub, "/do/enqueue", e),
 		getLog: () => doCall<LogEntry[]>(stub, "/do/log"),
+		logPost: (e: LogEntry) => doCall<{ ok: boolean }>(stub, "/do/log-post", e),
+		eligible: (platform: string) => doCall<{ eligible: boolean; reason: string }>(stub, "/do/eligible", { platform }),
 		drain: () => doCall<{ posted: number; kept: number; expired: number }>(stub, "/do/drain", {}),
 		scan: () => doCall<{ status: string }>(stub, "/do/scan", {}),
 	};
@@ -146,6 +184,15 @@ export class GeneratedAgentDO {
 			}
 			case "/do/log":
 				return json((await this.state.storage.get<LogEntry[]>("posting-log")) ?? []);
+			case "/do/log-post": {
+				await this.log(await request.json<LogEntry>());
+				return json({ ok: true });
+			}
+			case "/do/eligible": {
+				const { platform } = await request.json<{ platform: string }>();
+				const logEntries = (await this.state.storage.get<LogEntry[]>("posting-log")) ?? [];
+				return json(this.eligibility(platform, logEntries, Date.now()));
+			}
 			case "/do/drain":
 				return json(await this.drain());
 			case "/do/scan":
@@ -183,12 +230,13 @@ export class GeneratedAgentDO {
 				await this.log({ at: now, platform: entry.platform, result: "EXPIRED", attempts: 0, linkOrError: "queued >72h" });
 				continue;
 			}
-			if (!this.eligible(entry.platform, logEntries, now)) {
+			if (!this.eligibility(entry.platform, logEntries, now).eligible) {
 				kept.push(entry);
 				continue;
 			}
 			// TODO: dispatch to the owner's posting route (local browser runner task for
-			// x/facebook/tiktok, API call for instagram/bluesky). Blocked on runner post.* task types.
+			// x/facebook/tiktok; instagram needs stored credentials which the platform key
+			// vault does not support yet — caller-credential posts happen via /post/instagram).
 			kept.push(entry); // keep until dispatch exists — never silently drop
 		}
 
@@ -196,16 +244,23 @@ export class GeneratedAgentDO {
 		return { posted, kept: kept.length, expired };
 	}
 
-	private eligible(platform: string, logEntries: LogEntry[], now: number): boolean {
+	private eligibility(platform: string, logEntries: LogEntry[], now: number): { eligible: boolean; reason: string } {
 		const successes = logEntries.filter((l) => l.result === "SUCCESS");
-		const todayStart = new Date(now).setUTCHours(14, 0, 0, 0) - (now < new Date(now).setUTCHours(14, 0, 0, 0) ? 86400_000 : 0); // AEST midnight = 14:00 UTC
+		const aestMidnightUtc = new Date(now).setUTCHours(14, 0, 0, 0);
+		const todayStart = aestMidnightUtc - (now < aestMidnightUtc ? 86400_000 : 0); // AEST midnight = 14:00 UTC
 		const todayOnPlatform = successes.filter((l) => l.platform === platform && l.at >= todayStart).length;
-		if (todayOnPlatform >= (DAILY_CAPS[platform] ?? 1)) return false;
+		if (todayOnPlatform >= (DAILY_CAPS[platform] ?? 1)) {
+			return { eligible: false, reason: `daily cap reached for ${platform} (${todayOnPlatform}/${DAILY_CAPS[platform] ?? 1})` };
+		}
 		const lastOnPlatform = Math.max(0, ...successes.filter((l) => l.platform === platform).map((l) => l.at));
-		if (now - lastOnPlatform < PLATFORM_GAP_MS) return false;
+		if (now - lastOnPlatform < PLATFORM_GAP_MS) {
+			return { eligible: false, reason: `6h gap not elapsed on ${platform}` };
+		}
 		const lastAny = Math.max(0, ...successes.map((l) => l.at));
-		if (now - lastAny < GLOBAL_GAP_MS) return false;
-		return true;
+		if (now - lastAny < GLOBAL_GAP_MS) {
+			return { eligible: false, reason: "30min global gap not elapsed" };
+		}
+		return { eligible: true, reason: "" };
 	}
 }
 
