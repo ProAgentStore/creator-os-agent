@@ -3,6 +3,10 @@ main = "src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# 23:00 UTC = 09:00 AEST daily scan; 00:00/05:00/10:00 UTC = 10:00/15:00/20:00 AEST queue drain
+[triggers]
+crons = ["0 23 * * *", "0 0,5,10 * * *"]
+
 [[routes]]
 pattern = "creator-os-agent.proagentstore.online/*"
 zone_name = "proagentstore.online"
