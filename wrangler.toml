@@ -1,0 +1,16 @@
+name = "proagentstore-creator-os-agent"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[routes]]
+pattern = "creator-os-agent.proagentstore.online/*"
+zone_name = "proagentstore.online"
+
+[[durable_objects.bindings]]
+name = "AGENT"
+class_name = "GeneratedAgentDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GeneratedAgentDO"]
