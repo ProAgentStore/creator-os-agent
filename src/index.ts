@@ -99,7 +99,17 @@ app.post("/post/instagram", async (c) => {
 		attempts: 1,
 		linkOrError: result.ok ? (result.permalink ?? result.mediaId ?? "posted") : `${result.phase}: ${result.error}`,
 	});
-	return c.json(result, result.ok ? 200 : 502);
+	if (!result.ok) {
+		// Policy: failed posts are queued for retry, never dropped
+		const entry = await dObj.enqueue({
+			platform: "instagram",
+			mediaRef: video_url,
+			caption,
+			reason: `post failed at ${result.phase}: ${(result.error ?? "").slice(0, 120)}`,
+		});
+		return c.json({ ...result, queued: entry }, 502);
+	}
+	return c.json(result);
 });
 
 app.post("/chat", async (c) => {
@@ -263,8 +273,11 @@ export class GeneratedAgentDO {
 
 	private eligibility(platform: string, logEntries: LogEntry[], now: number): { eligible: boolean; reason: string } {
 		const successes = logEntries.filter((l) => l.result === "SUCCESS");
+		// AEST midnight = 14:00 UTC. NOTE: Melbourne shifts to AEDT (UTC+11) in summer,
+		// which moves the true local midnight to 13:00 UTC — the cap day is then offset
+		// by 1h. Acceptable drift for a safety cap; revisit if it ever matters.
 		const aestMidnightUtc = new Date(now).setUTCHours(14, 0, 0, 0);
-		const todayStart = aestMidnightUtc - (now < aestMidnightUtc ? 86400_000 : 0); // AEST midnight = 14:00 UTC
+		const todayStart = aestMidnightUtc - (now < aestMidnightUtc ? 86400_000 : 0);
 		const todayOnPlatform = successes.filter((l) => l.platform === platform && l.at >= todayStart).length;
 		if (todayOnPlatform >= (DAILY_CAPS[platform] ?? 1)) {
 			return { eligible: false, reason: `daily cap reached for ${platform} (${todayOnPlatform}/${DAILY_CAPS[platform] ?? 1})` };
