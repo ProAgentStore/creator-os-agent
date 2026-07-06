@@ -21,10 +21,20 @@ describe("eligibility", () => {
 		expect(r.reason).toContain("daily cap");
 	});
 
-	it("cap resets after the AEST day boundary", () => {
-		// success 1h BEFORE the AEST day started — yesterday's post
-		const log = [success("instagram", DAY_START - 3600_000)];
+	it("cap resets after the AEST day boundary (older post also outside the 6h gap)", () => {
+		// 9h before NOW: before the AEST day started AND outside the 6h platform gap —
+		// isolates the day-boundary logic. (A post merely 1h before the boundary would
+		// still be blocked by the gap; the rules compose.)
+		const log = [success("instagram", NOW - 9 * 3600_000)];
 		expect(eligibility("instagram", log, NOW).eligible).toBe(true);
+	});
+
+	it("yesterday's post inside the 6h gap still blocks — rules compose", () => {
+		// 1h before day start = 5h before NOW: cap has reset, gap has not elapsed
+		const log = [success("instagram", DAY_START - 3600_000)];
+		const r = eligibility("instagram", log, NOW);
+		expect(r.eligible).toBe(false);
+		expect(r.reason).toContain("6h gap");
 	});
 
 	it("enforces the 6h per-platform gap even under the cap", () => {
